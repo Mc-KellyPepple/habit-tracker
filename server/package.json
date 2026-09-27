@@ -1,0 +1,26 @@
+{
+  "name": "habit-tracker-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiny reminder service: finds habits due this hour with no check-in yet, sends Expo push notifications. Triggered by an external free scheduler (cron-job.org), not Render's own cron (paid-only on the free plan).",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "expo-server-sdk": "^3.10.0",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.10",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

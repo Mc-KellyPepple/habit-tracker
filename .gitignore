@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+npm-debug.log*
+
+# Env files — never commit real secrets
+.env
+.env.local
+
+# Expo
+.expo/
+.expo-shared/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# macOS
+.DS_Store

@@ -1,0 +1,17 @@
+{
+  "name": "habit-tracker",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "expo.vscode-expo-tools",
+        "supabase.vscode-supabase-extension",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+  "postCreateCommand": "cd server && npm install && cd ../mobile && npm install",
+  "forwardPorts": [3000, 8081]
+}
