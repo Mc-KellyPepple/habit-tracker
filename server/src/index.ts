@@ -1,3 +1,4 @@
+import path from 'path';
 import express from 'express';
 import { sendReminders } from './sendReminders';
 
@@ -12,6 +13,17 @@ if (!CRON_SECRET) {
     'stranger from finding your .onrender.com URL and spamming your users with pushes.'
   );
 }
+
+// 1. Resolve path to server/public directory
+const publicPath = path.resolve(__dirname, '../public');
+
+// 2. Serve static assets (CSS, JS, images) from server/public
+app.use(express.static(publicPath));
+
+// 3. Serve index.html on root GET request for portfolio visitors
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(publicPath, 'index.html'));
+});
 
 // Render's free web services spin down after ~15 min idle and cold-start
 // on the next request — that's fine here, since the external scheduler's
