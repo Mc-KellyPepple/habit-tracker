@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Habit Tracker | Web Dashboard</title>
+    <style>
+        :root { --bg: #0f172a; --card: #1e293b; --accent: #6366f1; --text: #f8fafc; }
+        body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .card { background: var(--card); padding: 32px; border-radius: 16px; width: 100%; max-width: 480px; box-shadow: 0 10px 25px rgba(0,0,0,0.3); border: 1px solid #334155; }
+        .badge { background: rgba(99, 102, 241, 0.2); color: #818cf8; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; display: inline-block; margin-bottom: 12px; }
+        h1 { margin: 0 0 8px 0; font-size: 1.8rem; }
+        p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; }
+        .status { display: flex; align-items: center; gap: 8px; margin: 20px 0; padding: 12px; background: rgba(16, 185, 129, 0.1); border-left: 4px solid #10b981; border-radius: 4px; color: #34d399; font-size: 0.9rem; }
+        .btn { display: block; width: 100%; padding: 12px; background: var(--accent); color: white; text-align: center; text-decoration: none; border-radius: 8px; font-weight: 600; margin-top: 16px; box-sizing: border-box; }
+        .btn:hover { background: #4f46e5; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <span class="badge">React Native & Node.js API</span>
+        <h1>Habit Tracker Backend</h1>
+        <p>Production API service for the Habit Tracker mobile application powered by Express and Supabase.</p>
+        
+        <div class="status">
+            <span>●</span> API Engine Online & Health Check Passed
+        </div>
+
+        <a href="/health" class="btn" target="_blank">Check API Health Endpoint</a>
+    </div>
+</body>
+</html>
