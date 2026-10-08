@@ -1,251 +1,492 @@
+import { createClient } from '@supabase/supabase-js';
 import { Expo, ExpoPushMessage } from 'expo-server-sdk';
-import { supabaseAdmin } from './supabaseAdmin';
+
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
 const expo = new Expo();
 
-type HabitRow = {
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 5 * 60 * 1000;
+const MAX_WINDOW_MS = 15 * 60 * 1000;
+
+type Habit = {
   id: string;
   user_id: string;
   name: string;
+  reminder_hour_utc: number;
 };
 
-type ClaimRow = {
+type PushTarget = {
+  userId: string;
+  habitIds: string[];
+  token: string;
+};
+
+type HabitIdRow = {
   habit_id: string;
 };
 
-export type ReminderRunResult = {
-  hourChecked: number;
-  habitsDueThisHour: number;
-  habitsAlreadyCheckedIn: number;
-  habitsAlreadyReminded: number;
-  usersNotified: number;
-  pushTicketsSent: number;
-  skippedNoToken: number;
-  errors: string[];
+type PushTokenRow = {
+  user_id: string;
+  expo_push_token: string;
 };
 
-export async function sendReminders(): Promise<ReminderRunResult> {
-  const errors: string[] = [];
-  const nowUtc = new Date();
-  const hour = nowUtc.getUTCHours();
-  const todayUtc = nowUtc.toISOString().slice(0, 10);
+const sleep = (ms: number) =>
+  new Promise(resolve => setTimeout(resolve, ms));
 
-  const { data: dueHabits, error: habitsErr } = await supabaseAdmin
+export async function sendReminders() {
+  const startedAt = Date.now();
+  const reminderDate = new Date().toISOString().slice(0, 10);
+  const currentHour = new Date().getUTCHours();
+
+  const { data: habits, error: habitsError } = await supabase
     .from('habits')
-    .select('id, user_id, name')
-    .eq('reminder_hour_utc', hour)
-    .eq('archived', false);
+    .select('id,user_id,name,reminder_hour_utc')
+    .eq('archived', false)
+    .eq('reminder_hour_utc', currentHour);
 
-  if (habitsErr) {
-    throw new Error(`Failed to load habits due this hour: ${habitsErr.message}`);
-  }
+  if (habitsError) throw habitsError;
 
-  const habits = (dueHabits ?? []) as HabitRow[];
-
-  if (habits.length === 0) {
+  if (!habits?.length) {
     return {
-      hourChecked: hour,
-      habitsDueThisHour: 0,
-      habitsAlreadyCheckedIn: 0,
-      habitsAlreadyReminded: 0,
+      reminderDate,
+      currentHour,
+      started: 0,
+      delivered: 0,
+      checkedIn: 0,
+      expired: 0,
+      attempts: 0,
       usersNotified: 0,
-      pushTicketsSent: 0,
-      skippedNoToken: 0,
-      errors,
     };
   }
 
-  const habitIds = habits.map(h => h.id);
+  const habitList = habits as Habit[];
+  const habitIds = habitList.map(habit => habit.id);
 
-  const { data: todaysCheckins, error: checkinsErr } = await supabaseAdmin
+  const {
+    data: checkins,
+    error: checkinsError,
+  } = await supabase
     .from('checkins')
     .select('habit_id')
     .in('habit_id', habitIds)
-    .eq('checked_at', todayUtc);
+    .eq('checked_at', reminderDate);
 
-  if (checkinsErr) {
-    throw new Error(`Failed to load today's check-ins: ${checkinsErr.message}`);
+  if (checkinsError) throw checkinsError;
+
+  const checkedInIds = new Set<string>();
+
+  for (const row of (checkins ?? []) as HabitIdRow[]) {
+    checkedInIds.add(row.habit_id);
   }
 
-  const checkedInHabitIds = new Set(
-    (todaysCheckins ?? []).map(c => c.habit_id)
+  const uncheckedHabits = habitList.filter(
+    habit => !checkedInIds.has(habit.id)
   );
 
-  const pendingHabits = habits.filter(
-    h => !checkedInHabitIds.has(h.id)
-  );
-
-  if (pendingHabits.length === 0) {
+  if (!uncheckedHabits.length) {
     return {
-      hourChecked: hour,
-      habitsDueThisHour: habits.length,
-      habitsAlreadyCheckedIn: habits.length,
-      habitsAlreadyReminded: 0,
+      reminderDate,
+      currentHour,
+      started: 0,
+      delivered: 0,
+      checkedIn: habitList.length,
+      expired: 0,
+      attempts: 0,
       usersNotified: 0,
-      pushTicketsSent: 0,
-      skippedNoToken: 0,
-      errors,
     };
   }
 
-  const userIds = [...new Set(
-    pendingHabits.map(h => h.user_id)
-  )];
-
-  const { data: tokenRows, error: tokensErr } = await supabaseAdmin
+  const { data: tokens, error: tokensError } = await supabase
     .from('push_tokens')
-    .select('user_id, expo_push_token')
-    .in('user_id', userIds);
+    .select('user_id,expo_push_token')
+    .in(
+      'user_id',
+      [...new Set(uncheckedHabits.map(habit => habit.user_id))]
+    );
 
-  if (tokensErr) {
-    throw new Error(`Failed to load push tokens: ${tokensErr.message}`);
+  if (tokensError) throw tokensError;
+
+  const validTokens = new Map<string, string>();
+
+  for (const row of (tokens ?? []) as PushTokenRow[]) {
+    if (Expo.isExpoPushToken(row.expo_push_token)) {
+      validTokens.set(row.user_id, row.expo_push_token);
+    }
   }
 
-  const tokenByUser = new Map(
-    (tokenRows ?? []).map(t => [
-      t.user_id,
-      t.expo_push_token,
-    ])
+  const sendableHabits = uncheckedHabits.filter(
+    habit => validTokens.has(habit.user_id)
   );
 
-  const sendableHabits: HabitRow[] = [];
-  let skippedNoToken = 0;
-
-  for (const habit of pendingHabits) {
-    const token = tokenByUser.get(habit.user_id);
-
-    if (!token || !Expo.isExpoPushToken(token)) {
-      skippedNoToken++;
-      continue;
-    }
-
-    sendableHabits.push(habit);
-  }
-
-  if (sendableHabits.length === 0) {
+  if (!sendableHabits.length) {
     return {
-      hourChecked: hour,
-      habitsDueThisHour: habits.length,
-      habitsAlreadyCheckedIn: checkedInHabitIds.size,
-      habitsAlreadyReminded: 0,
+      reminderDate,
+      currentHour,
+      started: 0,
+      delivered: 0,
+      checkedIn: checkedInIds.size,
+      expired: 0,
+      attempts: 0,
       usersNotified: 0,
-      pushTicketsSent: 0,
-      skippedNoToken,
-      errors,
+      skippedNoToken: uncheckedHabits.length,
     };
   }
 
-  const { data: claimedRows, error: claimErr } = await supabaseAdmin.rpc(
-    'claim_reminder_deliveries',
+  const sendableIds = sendableHabits.map(habit => habit.id);
+
+  const {
+    data: startedRows,
+    error: startError,
+  } = await supabase.rpc(
+    'start_reminder_deliveries',
     {
-      p_habit_ids: sendableHabits.map(h => h.id),
-      p_reminder_date: todayUtc,
+      p_habit_ids: sendableIds,
+      p_reminder_date: reminderDate,
     }
   );
 
-  if (claimErr) {
-    throw new Error(
-      `Failed to claim reminder deliveries: ${claimErr.message}`
+  if (startError) throw startError;
+
+  const startedIds = new Set<string>();
+
+  for (const row of (startedRows ?? []) as HabitIdRow[]) {
+    startedIds.add(row.habit_id);
+  }
+
+  const activeHabits = sendableHabits.filter(habit =>
+    startedIds.has(habit.id)
+  );
+
+  if (!activeHabits.length) {
+    return {
+      reminderDate,
+      currentHour,
+      started: 0,
+      delivered: 0,
+      checkedIn: checkedInIds.size,
+      expired: 0,
+      attempts: 0,
+      usersNotified: 0,
+      alreadyProcessed: sendableIds.length,
+    };
+  }
+
+  const activeById = new Map<string, Habit>();
+
+  for (const habit of activeHabits) {
+    activeById.set(habit.id, habit);
+  }
+
+  let activeIds = new Set<string>(
+    activeHabits.map(habit => habit.id)
+  );
+
+  let deliveredCount = 0;
+  let checkedInCount = checkedInIds.size;
+  let attemptsMade = 0;
+
+  const successfulUsers = new Set<string>();
+
+  for (
+    let attempt = 1;
+    attempt <= MAX_ATTEMPTS;
+    attempt++
+  ) {
+    const elapsed = Date.now() - startedAt;
+
+    if (
+      elapsed >= MAX_WINDOW_MS ||
+      activeIds.size === 0
+    ) {
+      break;
+    }
+
+    const currentActiveIds = [...activeIds];
+
+    const {
+      data: latestCheckins,
+      error: latestCheckinsError,
+    } = await supabase
+      .from('checkins')
+      .select('habit_id')
+      .in('habit_id', currentActiveIds)
+      .eq('checked_at', reminderDate);
+
+    if (latestCheckinsError) {
+      throw latestCheckinsError;
+    }
+
+    const newlyCheckedIds = new Set<string>();
+
+    for (
+      const row of (latestCheckins ?? []) as HabitIdRow[]
+    ) {
+      newlyCheckedIds.add(row.habit_id);
+    }
+
+    if (newlyCheckedIds.size) {
+      const idsToFinish = currentActiveIds.filter(id =>
+        newlyCheckedIds.has(id)
+      );
+
+      const { error: finishError } = await supabase.rpc(
+        'finish_checked_in_reminders',
+        {
+          p_habit_ids: idsToFinish,
+          p_reminder_date: reminderDate,
+        }
+      );
+
+      if (finishError) throw finishError;
+
+      for (const id of idsToFinish) {
+        activeIds.delete(id);
+      }
+
+      checkedInCount += idsToFinish.length;
+    }
+
+    if (activeIds.size === 0) {
+      break;
+    }
+
+    const attemptIds = [...activeIds];
+
+    const { error: attemptError } = await supabase.rpc(
+      'record_reminder_attempt',
+      {
+        p_habit_ids: attemptIds,
+        p_reminder_date: reminderDate,
+      }
+    );
+
+    if (attemptError) throw attemptError;
+
+    const byUser = new Map<string, string[]>();
+
+    for (const habitId of attemptIds) {
+      const habit = activeById.get(habitId);
+
+      if (!habit) continue;
+
+      const existing = byUser.get(habit.user_id) ?? [];
+
+      existing.push(habitId);
+
+      byUser.set(habit.user_id, existing);
+    }
+
+    const messages: ExpoPushMessage[] = [];
+    const targets: PushTarget[] = [];
+
+    for (const [userId, userHabitIds] of byUser) {
+      const token = validTokens.get(userId);
+
+      if (!token) continue;
+
+      const names: string[] = [];
+
+      for (const habitId of userHabitIds) {
+        const name = activeById.get(habitId)?.name;
+
+        if (name) {
+          names.push(name);
+        }
+      }
+
+      messages.push({
+        to: token,
+        sound: 'default',
+        title:
+          userHabitIds.length === 1
+            ? 'Habit Reminder'
+            : 'Habit Reminders',
+        body:
+          userHabitIds.length === 1
+            ? `Time to complete "${names[0]}".`
+            : `You have ${userHabitIds.length} habits to complete.`,
+        data: {
+          reminderDate,
+          habitIds: userHabitIds,
+        },
+      });
+
+      targets.push({
+        userId,
+        habitIds: userHabitIds,
+        token,
+      });
+    }
+
+    if (!messages.length) {
+      break;
+    }
+
+    const messageChunks =
+      expo.chunkPushNotifications(messages);
+
+    let messageOffset = 0;
+
+    for (const chunk of messageChunks) {
+      if (
+        Date.now() - startedAt >= MAX_WINDOW_MS ||
+        activeIds.size === 0
+      ) {
+        break;
+      }
+
+      const chunkTargets = targets.slice(
+        messageOffset,
+        messageOffset + chunk.length
+      );
+
+      const tickets =
+        await expo.sendPushNotificationsAsync(chunk);
+
+      attemptsMade += tickets.length;
+
+      for (let i = 0; i < tickets.length; i++) {
+        const ticket = tickets[i];
+        const target = chunkTargets[i];
+
+        if (!target) continue;
+
+        if (ticket.status === 'ok') {
+          const deliveredIds = target.habitIds.filter(
+            id => activeIds.has(id)
+          );
+
+          if (deliveredIds.length) {
+            const {
+              error: deliveredError,
+            } = await supabase.rpc(
+              'finish_delivered_reminders',
+              {
+                p_habit_ids: deliveredIds,
+                p_reminder_date: reminderDate,
+              }
+            );
+
+            if (deliveredError) {
+              throw deliveredError;
+            }
+
+            for (const id of deliveredIds) {
+              activeIds.delete(id);
+            }
+
+            deliveredCount += deliveredIds.length;
+            successfulUsers.add(target.userId);
+          }
+        }
+      }
+
+      messageOffset += chunk.length;
+    }
+
+    if (activeIds.size === 0) {
+      break;
+    }
+
+    if (attempt === MAX_ATTEMPTS) {
+      break;
+    }
+
+    const remainingWindow =
+      MAX_WINDOW_MS - (Date.now() - startedAt);
+
+    if (remainingWindow <= 0) {
+      break;
+    }
+
+    await sleep(
+      Math.min(
+        RETRY_DELAY_MS,
+        remainingWindow
+      )
     );
   }
 
-  const claimed = (claimedRows ?? []) as ClaimRow[];
-  const claimedIds = new Set(
-    claimed.map(row => row.habit_id)
-  );
+  if (activeIds.size) {
+    const finalIds = [...activeIds];
 
-  const alreadyReminded =
-    sendableHabits.length - claimed.length;
+    const {
+      data: finalCheckins,
+      error: finalCheckinsError,
+    } = await supabase
+      .from('checkins')
+      .select('habit_id')
+      .in('habit_id', finalIds)
+      .eq('checked_at', reminderDate);
 
-  const claimedHabits = sendableHabits.filter(
-    h => claimedIds.has(h.id)
-  );
-
-  if (claimedHabits.length === 0) {
-    return {
-      hourChecked: hour,
-      habitsDueThisHour: habits.length,
-      habitsAlreadyCheckedIn: checkedInHabitIds.size,
-      habitsAlreadyReminded: alreadyReminded,
-      usersNotified: 0,
-      pushTicketsSent: 0,
-      skippedNoToken,
-      errors,
-    };
-  }
-
-  const habitsByUser = new Map<string, HabitRow[]>();
-
-  for (const habit of claimedHabits) {
-    const list = habitsByUser.get(habit.user_id) ?? [];
-    list.push(habit);
-    habitsByUser.set(habit.user_id, list);
-  }
-
-  const messages: ExpoPushMessage[] = [];
-
-  for (const [userId, userHabits] of habitsByUser) {
-    const token = tokenByUser.get(userId);
-
-    if (!token || !Expo.isExpoPushToken(token)) {
-      continue;
+    if (finalCheckinsError) {
+      throw finalCheckinsError;
     }
 
-    const habitNames = userHabits.map(h => h.name);
-    const habitIds = userHabits.map(h => h.id);
+    const finalCheckedIds = new Set<string>();
 
-    const title =
-      habitNames.length === 1
-        ? habitNames[0]
-        : `${habitNames.length} habits`;
+    for (
+      const row of (finalCheckins ?? []) as HabitIdRow[]
+    ) {
+      finalCheckedIds.add(row.habit_id);
+    }
 
-    const body =
-      habitNames.length === 1
-        ? "You haven't checked in yet today — tap to mark it done."
-        : `Still pending today: ${habitNames.join(', ')}`;
-
-    messages.push({
-      to: token,
-      sound: 'default',
-      title,
-      body,
-      data: {
-        habitNames,
-        habitIds,
-      },
-    });
-  }
-
-  let pushTicketsSent = 0;
-
-  for (const chunk of expo.chunkPushNotifications(messages)) {
-    try {
-      const tickets = await expo.sendPushNotificationsAsync(chunk);
-
-      pushTicketsSent += tickets.length;
-
-      tickets.forEach((ticket, index) => {
-        if (ticket.status === 'error') {
-          errors.push(
-            ticket.message || 'Expo push notification failed'
-          );
-        }
-      });
-    } catch (err) {
-      errors.push(
-        err instanceof Error ? err.message : String(err)
+    if (finalCheckedIds.size) {
+      const idsToFinish = finalIds.filter(id =>
+        finalCheckedIds.has(id)
       );
+
+      const { error: finishError } = await supabase.rpc(
+        'finish_checked_in_reminders',
+        {
+          p_habit_ids: idsToFinish,
+          p_reminder_date: reminderDate,
+        }
+      );
+
+      if (finishError) throw finishError;
+
+      for (const id of idsToFinish) {
+        activeIds.delete(id);
+      }
+
+      checkedInCount += idsToFinish.length;
     }
+  }
+
+  let expiredCount = 0;
+
+  if (activeIds.size) {
+    const idsToExpire = [...activeIds];
+
+    const { error: expireError } = await supabase.rpc(
+      'expire_reminder_deliveries',
+      {
+        p_habit_ids: idsToExpire,
+        p_reminder_date: reminderDate,
+      }
+    );
+
+    if (expireError) throw expireError;
+
+    expiredCount = idsToExpire.length;
   }
 
   return {
-    hourChecked: hour,
-    habitsDueThisHour: habits.length,
-    habitsAlreadyCheckedIn: checkedInHabitIds.size,
-    habitsAlreadyReminded: alreadyReminded,
-    usersNotified: messages.length,
-    pushTicketsSent,
-    skippedNoToken,
-    errors,
+    reminderDate,
+    currentHour,
+    started: activeHabits.length,
+    delivered: deliveredCount,
+    checkedIn: checkedInCount,
+    expired: expiredCount,
+    attempts: attemptsMade,
+    usersNotified: successfulUsers.size,
+    durationSeconds: Math.round(
+      (Date.now() - startedAt) / 1000
+    ),
   };
 }
