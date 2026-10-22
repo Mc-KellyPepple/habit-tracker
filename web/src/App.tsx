@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { supabase } from "./lib/supabase";
 import { formatHour, localHourToUtcHour, utcHourToLocalHour } from "./lib/time";
+import ReminderPanel from "./ReminderPanel";
 import "./App.css";
 
 type Habit = {
@@ -462,6 +463,7 @@ export default function App() {
               </label>
               <button className="primary-button" disabled={adding || !habitName.trim()}>{adding ? "Adding…" : "+ Add habit"}</button>
             </form>
+            <ReminderPanel userId={user.id} />
             <div className="tip-box"><span>✧</span><p><strong>Build a lasting routine</strong><br />Start with a habit you can complete even on your busiest days.</p></div>
           </aside>
         </div>

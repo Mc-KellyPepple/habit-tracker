@@ -189,3 +189,11 @@ h3 { font: 700 15px Manrope, sans-serif; margin-bottom: 5px; }
 .habit-edit input:focus, .habit-edit select:focus { border-color: #5aab80; box-shadow: 0 0 0 3px #237a5817; }
 .action-save { background: var(--green); color: white; border-radius: 8px; padding: 8px 12px; }
 .action-save:hover:not(:disabled) { text-decoration: none; background: var(--green-dark); }
+
+/* Phone reminders (Web Push) */
+.push-panel { margin-top: 20px; padding-top: 18px; border-top: 1px solid #eef0ed; }
+.push-panel h3 { font-size: 14px; margin: 0 0 6px; }
+.push-panel p { font-size: 12px; line-height: 1.6; color: var(--muted); margin: 0 0 12px; }
+.push-panel .push-on { color: var(--green); font-weight: 700; margin-bottom: 4px; }
+.push-actions { display: flex; gap: 14px; }
+.push-error { color: #b34a4a !important; }

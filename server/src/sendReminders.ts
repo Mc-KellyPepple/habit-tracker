@@ -1,5 +1,6 @@
 import { Expo, ExpoPushMessage } from 'expo-server-sdk';
 import { supabaseAdmin as supabase } from './supabaseAdmin';
+import { isWebPushEnabled, sendWebPush, WebSub } from './webPush';
 
 const expo = new Expo();
 const MAX_ATTEMPTS = 3;
@@ -15,7 +16,16 @@ type ActivityRow = { habit_id: string; retired_at: string | null };
 type PushTarget = { userId: string; habitIds: string[] };
 type HabitIdRow = { habit_id: string };
 type PushTokenRow = { user_id: string; expo_push_token: string };
+type WebSubRow = { user_id: string; endpoint: string; p256dh: string; auth: string };
 type DeliveryRow = { habit_id: string; attempts: number; status: string; expires_at: string };
+
+// Same wording the app has always received.
+function reminderText(count: number, names: string[]) {
+  return {
+    title: count === 1 ? 'Habit Reminder' : 'Habit Reminders',
+    body: count === 1 ? `Time to complete "${names[0] ?? 'your habit'}".` : `You have ${count} habits to complete.`,
+  };
+}
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -70,7 +80,24 @@ export async function sendReminders() {
     if (Expo.isExpoPushToken(row.expo_push_token)) validTokens.set(row.user_id, row.expo_push_token);
   }
 
-  const sendableHabits = uncheckedHabits.filter(h => validTokens.has(h.user_id));
+  // Browser (Web Push) subscriptions are optional. Any problem here must never
+  // stop app reminders, so failures are logged and ignored.
+  const webSubsByUser = new Map<string, WebSub[]>();
+  if (isWebPushEnabled()) {
+    const { data: subs, error: subsError } = await supabase
+      .from('web_push_subscriptions').select('user_id,endpoint,p256dh,auth').in('user_id', userIds);
+    if (subsError) {
+      console.error('[reminders] Could not load web push subscriptions; continuing with app push only:', subsError.message);
+    } else {
+      for (const row of (subs ?? []) as WebSubRow[]) {
+        const list = webSubsByUser.get(row.user_id) ?? [];
+        list.push({ endpoint: row.endpoint, p256dh: row.p256dh, auth: row.auth });
+        webSubsByUser.set(row.user_id, list);
+      }
+    }
+  }
+
+  const sendableHabits = uncheckedHabits.filter(h => validTokens.has(h.user_id) || webSubsByUser.has(h.user_id));
   if (!sendableHabits.length) {
     return { reminderDate, currentHour, started: 0, delivered: 0, checkedIn: eligibleCheckedIds.size, expired: 0, attempts: 0, usersNotified: 0, skippedNoToken: uncheckedHabits.length };
   }
@@ -113,6 +140,8 @@ export async function sendReminders() {
   let deliveredCount = 0;
   let checkedInCount = eligibleCheckedIds.size;
   let attemptsMade = 0;
+  let webPushAccepted = 0;
+  let webSubscriptionsRemoved = 0;
   const successfulUsers = new Set<string>();
 
   while (activeIds.size) {
@@ -171,23 +200,22 @@ export async function sendReminders() {
 
     const messages: ExpoPushMessage[] = [];
     const targets: PushTarget[] = [];
+    const webTargets: PushTarget[] = [];
 
     for (const [userId, userHabitIds] of byUser) {
-      const token = validTokens.get(userId);
-      if (!token) continue;
       const names = userHabitIds.map(id => activeById.get(id)?.name).filter((name): name is string => Boolean(name));
+      const { title, body } = reminderText(userHabitIds.length, names);
 
-      messages.push({
-        to: token,
-        sound: 'default',
-        title: userHabitIds.length === 1 ? 'Habit Reminder' : 'Habit Reminders',
-        body: userHabitIds.length === 1 ? `Time to complete "${names[0] ?? 'your habit'}".` : `You have ${userHabitIds.length} habits to complete.`,
-        data: { reminderDate, habitIds: userHabitIds },
-      });
-      targets.push({ userId, habitIds: userHabitIds });
+      const token = validTokens.get(userId);
+      if (token) {
+        messages.push({ to: token, sound: 'default', title, body, data: { reminderDate, habitIds: userHabitIds } });
+        targets.push({ userId, habitIds: userHabitIds });
+      }
+
+      if (webSubsByUser.has(userId)) webTargets.push({ userId, habitIds: userHabitIds });
     }
 
-    if (!messages.length) {
+    if (!messages.length && !webTargets.length) {
       console.error('[reminders] No push messages could be built for active habits.');
       break;
     }
@@ -229,6 +257,45 @@ export async function sendReminders() {
         }
       }
       offset += chunk.length;
+    }
+
+    // Web Push (browsers). Runs after the app push so the app path is untouched.
+    // A habit counts as delivered if either channel was accepted.
+    for (const target of webTargets) {
+      const subs = webSubsByUser.get(target.userId) ?? [];
+      const names = target.habitIds.map(id => activeById.get(id)?.name).filter((name): name is string => Boolean(name));
+      const { title, body } = reminderText(target.habitIds.length, names);
+      const payload = { title, body, tag: 'habit-reminder', url: '/', reminderDate, habitIds: target.habitIds };
+
+      const results = await Promise.all(subs.map(sub => sendWebPush(sub, payload)));
+      attemptsMade += results.length;
+
+      const goneEndpoints = subs.filter((_, i) => results[i] === 'gone').map(sub => sub.endpoint);
+      if (goneEndpoints.length) {
+        const { error } = await supabase.from('web_push_subscriptions').delete().in('endpoint', goneEndpoints);
+        if (error) console.error('[reminders] Could not remove expired web subscriptions:', error.message);
+        else webSubscriptionsRemoved += goneEndpoints.length;
+        const remaining = subs.filter(sub => !goneEndpoints.includes(sub.endpoint));
+        if (remaining.length) webSubsByUser.set(target.userId, remaining);
+        else webSubsByUser.delete(target.userId);
+      }
+
+      const accepted = results.filter(r => r === 'accepted').length;
+      if (!accepted) continue;
+      webPushAccepted += accepted;
+
+      const deliveredIds = target.habitIds.filter(id => activeIds.has(id));
+      if (!deliveredIds.length) continue;
+
+      const { error } = await supabase.rpc('finish_delivered_reminders', {
+        p_habit_ids: deliveredIds,
+        p_reminder_date: reminderDate,
+      });
+      if (error) throw error;
+
+      deliveredIds.forEach(id => activeIds.delete(id));
+      deliveredCount += deliveredIds.length;
+      successfulUsers.add(target.userId);
     }
 
     if (!activeIds.size) break;
@@ -273,6 +340,8 @@ export async function sendReminders() {
     expired: expiredCount,
     attempts: attemptsMade,
     usersNotified: successfulUsers.size,
+    webPushAccepted,
+    webSubscriptionsRemoved,
     durationSeconds: Math.round((Date.now() - startedAt) / 1000),
   };
 }
