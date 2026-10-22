@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { supabase } from "./lib/supabase";
+import { formatHour, localHourToUtcHour, utcHourToLocalHour } from "./lib/time";
 import "./App.css";
 
 type Habit = {
@@ -71,10 +72,13 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [pageError, setPageError] = useState("");
   const [habitName, setHabitName] = useState("");
-  const [reminderHour, setReminderHour] = useState("8");
+  const [reminderHour, setReminderHour] = useState("9");
   const [adding, setAdding] = useState(false);
   const [busyHabit, setBusyHabit] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editHour, setEditHour] = useState("9");
 
   useEffect(() => {
     let alive = true;
@@ -179,7 +183,7 @@ export default function App() {
     const { error } = await supabase.from("habits").insert({
       user_id: user.id,
       name: habitName.trim(),
-      reminder_hour_utc: Number(reminderHour),
+      reminder_hour_utc: localHourToUtcHour(Number(reminderHour)),
     });
 
     if (error) setPageError(error.message);
@@ -223,14 +227,61 @@ export default function App() {
     setBusyHabit(null);
   };
 
-  const archiveHabit = async (habit: Habit) => {
-    if (!user) return;
-    if (!window.confirm(`Archive "${habit.name}"? You can still view its history.`)) return;
+  const startEdit = (habit: Habit) => {
+    setEditingId(habit.id);
+    setEditName(habit.name);
+    setEditHour(String(utcHourToLocalHour(habit.reminder_hour_utc)));
+    setPageError("");
+  };
+
+  const cancelEdit = () => setEditingId(null);
+
+  const saveEdit = async (event: FormEvent<HTMLFormElement>, habit: Habit) => {
+    event.preventDefault();
+    const name = editName.trim();
+    if (!user || !name) return;
 
     setBusyHabit(habit.id);
+    setPageError("");
+
+    const { data, error } = await supabase
+      .from("habits")
+      .update({ name, reminder_hour_utc: localHourToUtcHour(Number(editHour)) })
+      .eq("id", habit.id)
+      .eq("user_id", user.id)
+      .eq("archived", false)
+      .select("id");
+
+    if (error) setPageError(error.message);
+    else if (!data?.length) setPageError("Habit not updated. It may have been removed; refresh and try again.");
+    else setEditingId(null);
+
+    await loadDashboard();
+    setBusyHabit(null);
+  };
+
+  // Same behaviour as the mobile app: "Delete" removes the habit from your list
+  // but keeps its check-in history (it is archived). It can be restored below.
+  const removeHabit = async (habit: Habit) => {
+    if (!user) return;
+    if (!window.confirm(`Delete "${habit.name}"? It will be removed from your list and its reminders will stop.`)) return;
+    await setArchived(habit, true);
+  };
+
+  const restoreHabit = async (habit: Habit) => {
+    if (!user) return;
+    await setArchived(habit, false);
+  };
+
+  const setArchived = async (habit: Habit, archived: boolean) => {
+    if (!user) return;
+    setBusyHabit(habit.id);
+    setPageError("");
+    if (editingId === habit.id) setEditingId(null);
+
     const { error } = await supabase
       .from("habits")
-      .update({ archived: !habit.archived })
+      .update({ archived })
       .eq("id", habit.id)
       .eq("user_id", user.id);
 
@@ -241,7 +292,7 @@ export default function App() {
 
   const deleteHabit = async (habit: Habit) => {
     if (!user) return;
-    if (!window.confirm(`Permanently delete "${habit.name}" and its check-in history?`)) return;
+    if (!window.confirm(`Permanently delete "${habit.name}" and its check-in history? This cannot be undone.`)) return;
 
     setBusyHabit(habit.id);
     const { error } = await supabase
@@ -354,6 +405,20 @@ export default function App() {
                   {activeHabits.map((habit) => {
                     const done = completedToday.has(habit.id);
                     const dates = checkins.filter((c) => c.habit_id === habit.id).map((c) => c.checked_at);
+                    if (editingId === habit.id) {
+                      return (
+                        <form className="habit-row habit-edit" key={habit.id} onSubmit={(e) => void saveEdit(e, habit)}>
+                          <input value={editName} onChange={(e) => setEditName(e.target.value)} maxLength={80} required aria-label="Habit name" />
+                          <select value={editHour} onChange={(e) => setEditHour(e.target.value)} aria-label="Reminder time">
+                            {Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{formatHour(hour)}</option>)}
+                          </select>
+                          <div className="habit-actions">
+                            <button className="action-link action-save" disabled={busyHabit === habit.id || !editName.trim()}>{busyHabit === habit.id ? "Saving…" : "Save"}</button>
+                            <button type="button" className="action-link" onClick={cancelEdit} disabled={busyHabit === habit.id}>Cancel</button>
+                          </div>
+                        </form>
+                      );
+                    }
                     return (
                       <article className={`habit-row ${done ? "is-done" : ""}`} key={habit.id}>
                         <button className={`check-button ${done ? "checked" : ""}`} disabled={busyHabit === habit.id} onClick={() => void toggleCheckin(habit)} aria-label={done ? `Undo ${habit.name} completion` : `Complete ${habit.name}`}>
@@ -361,11 +426,12 @@ export default function App() {
                         </button>
                         <div className="habit-info">
                           <h3>{habit.name}</h3>
-                          <p>{calculateStreak(dates)} day streak <span className="bullet">·</span> Reminder {String(habit.reminder_hour_utc).padStart(2, "0")}:00 UTC</p>
+                          <p>{calculateStreak(dates)} day streak <span className="bullet">·</span> Reminder {formatHour(utcHourToLocalHour(habit.reminder_hour_utc))}</p>
                         </div>
                         <div className="habit-actions">
                           <span className={`status ${done ? "status-done" : ""}`}>{done ? "Completed" : "Today"}</span>
-                          <button className="icon-button" title="Archive habit" onClick={() => void archiveHabit(habit)} disabled={busyHabit === habit.id}>⋯</button>
+                          <button className="action-link" onClick={() => startEdit(habit)} disabled={busyHabit === habit.id}>Edit</button>
+                          <button className="action-link action-danger" onClick={() => void removeHabit(habit)} disabled={busyHabit === habit.id}>Delete</button>
                         </div>
                       </article>
                     );
@@ -373,12 +439,12 @@ export default function App() {
                 </div>
               )}
             <div className="archived-toggle">
-              <button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? "Hide archived habits" : `View archived habits (${habits.filter((h) => h.archived).length})`}</button>
+              <button className="text-button" onClick={() => setShowArchived((v) => !v)}>{showArchived ? "Hide deleted habits" : `View deleted habits (${habits.filter((h) => h.archived).length})`}</button>
             </div>
             {showArchived && habits.filter((h) => h.archived).map((habit) => (
               <div className="archived-row" key={habit.id}>
                 <span>{habit.name}</span>
-                <div><button className="text-button" onClick={() => void archiveHabit(habit)}>Restore</button><button className="text-button danger-text" onClick={() => void deleteHabit(habit)}>Delete</button></div>
+                <div><button className="text-button" onClick={() => void restoreHabit(habit)}>Restore</button><button className="text-button danger-text" onClick={() => void deleteHabit(habit)}>Delete forever</button></div>
               </div>
             ))}
           </section>
@@ -389,9 +455,9 @@ export default function App() {
               <label>Habit name
                 <input value={habitName} onChange={(e) => setHabitName(e.target.value)} maxLength={80} required placeholder="e.g. Read for 20 minutes" />
               </label>
-              <label>Daily reminder hour (UTC)
+              <label>Daily reminder time
                 <select value={reminderHour} onChange={(e) => setReminderHour(e.target.value)}>
-                  {Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{String(hour).padStart(2, "0")}:00 UTC</option>)}
+                  {Array.from({ length: 24 }, (_, hour) => <option value={hour} key={hour}>{formatHour(hour)}</option>)}
                 </select>
               </label>
               <button className="primary-button" disabled={adding || !habitName.trim()}>{adding ? "Adding…" : "+ Add habit"}</button>

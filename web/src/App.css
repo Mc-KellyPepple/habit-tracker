@@ -174,3 +174,18 @@ h3 { font: 700 15px Manrope, sans-serif; margin-bottom: 5px; }
   .status { font-size: 9px; padding: 5px 7px; }
   .habit-info p { font-size: 10px; }
 }
+/* Habit edit / delete actions (matches the mobile app) */
+.action-link { border: 0; background: transparent; font-size: 11px; font-weight: 700; padding: 6px 4px; color: var(--green); cursor: pointer; }
+.action-link:disabled { opacity: 0.5; cursor: default; }
+.action-link:hover:not(:disabled) { text-decoration: underline; }
+.action-danger { color: #b34a4a; }
+.habit-edit { flex-wrap: wrap; align-items: center; }
+.habit-edit input, .habit-edit select {
+  height: 40px; border: 1px solid #dfe5df; border-radius: 10px; padding: 0 10px;
+  background: white; color: var(--text); font-size: 13px; outline: none;
+}
+.habit-edit input { flex: 1 1 160px; min-width: 0; }
+.habit-edit select { flex: 0 0 auto; }
+.habit-edit input:focus, .habit-edit select:focus { border-color: #5aab80; box-shadow: 0 0 0 3px #237a5817; }
+.action-save { background: var(--green); color: white; border-radius: 8px; padding: 8px 12px; }
+.action-save:hover:not(:disabled) { text-decoration: none; background: var(--green-dark); }
